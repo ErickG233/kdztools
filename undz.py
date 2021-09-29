@@ -28,6 +28,8 @@ import argparse
 import hashlib
 from binascii import crc32, b2a_hex
 from uuid import UUID
+import xml.etree.cElementTree as ET
+from xml.dom import minidom
 
 # our tools are in "libexec"
 sys.path.append(os.path.join(sys.path[0], "libexec"))
@@ -171,6 +173,11 @@ class UNDZChunk(dz.DZChunk, UNDZUtils):
                   selfIdx, self.chunkName.decode("utf8"), self.dataSize))
         self.Messages()
         return ++selfIdx
+
+    def rawprogram(self, data, patches):
+        sizeKB = (self.targetSize >> 10)
+        ET.SubElement(data[self.dev], "program", SECTOR_SIZE_IN_BYTES="{:d}".format(1 << self.dz.shiftLBA), file_sector_offset="0", filename="{:s}".format(self.getChunkName()), label="{:s}".format(self.sliceName.decode("utf8")), num_partition_sectors="{:d}".format(
+            sizeKB >> 2), physical_partition_number="{:d}".format(self.dev), size_in_KB="{:d}".format(sizeKB), sparse="false", start_byte_hex="0x{:X}".format(self.getTargetStart()), start_sector="{:d}".format(self.getTargetStart() >> self.dz.shiftLBA))
 
     def extract(self):
         """
@@ -406,6 +413,10 @@ class UNDZSlice(object):
             chunk.display(sliceIdx, chunkIdx)
             chunkIdx += 1
         return chunkIdx
+
+    def rawprogram(self, data, patches):
+        for chunk in self.chunks:
+            chunk.rawprogram(data, patches)
 
     def getChunkCount(self):
         """
@@ -779,6 +790,48 @@ class UNDZFile(dz.DZFile, UNDZUtils):
         for m in self.messages:
             print(m)
 
+    def rawprogram(self):
+        data = [ET.Element("data") for i in range(7)]
+        patches = [ET.Element("patches") for i in range(7)]
+        for slice in self.slices:
+            slice.rawprogram(data, patches)
+        for i in range(7):
+            xml = data[i]
+            real_len = 0
+            virt_len = 0
+            last_label = ""
+            for el in xml.iter():
+                virt_len += 1
+                if (last_label != el.get('label')):
+                    real_len += 1
+                    last_label = el.get('label')
+            SectorSize = (1 << self.shiftLBA)
+            StartSector = 40+(real_len-1)*128
+            ByteOffset = StartSector % SectorSize
+            PrimaryGPTNumLBAs = 6
+            BackupGPTNumLBAs = 5
+            real_len -= 1
+            virt_len -= 1
+            # ET.SubElement(patches[i], "patch",
+            #        SECTOR_SIZE_IN_BYTES="{:d}".format(SectorSize),
+            #        byte_offset="{:d}".format(ByteOffset),
+            #        filename=xml[0].get('filename'),
+            #        physical_partition_number="{:d}".format(i),
+            #        size_in_bytes="8",
+            #        start_sector="{:d}".format(StartSector),
+            #        value="NUM_DISK_SECTORS-{:d}".format(PrimaryGPTNumLBAs),
+            #        what="Update last partition {:d} '{:s}' with actual size in Primary Header.".format(real_len, xml[virt_len - 1].get('label'))
+            #        )
+        for i in range(7):
+            dom1 = minidom.parseString(ET.tostring(data[i]))
+            #dom2 = minidom.parseString(ET.tostring(patches[i]))
+            f1 = open("rawprogram{:d}.xml".format(i), "wb")
+            #f2 = open("patch{:d}.xml".format(i), "wb")
+            f1.write(dom1.toprettyxml(indent='\t').encode())
+            f1.close()
+            # f2.write(dom2.toprettyxml(indent='\t').encode())
+            # f2.close()
+
     def getChunkCount(self):
         """
         Return the number of chunks in the whole file
@@ -953,6 +1006,8 @@ class DZFileTools:
         group = parser.add_mutually_exclusive_group(required=True)
         group.add_argument('-l', '--list', help='list slices/partitions',
                            action='store_true', dest='listOnly')
+        group.add_argument('-r', '--rawprogram', help='generate rawprogram(number).xml(s)',
+                           action='store_true', dest='rawprogram')
         group.add_argument('-x', '--extract', help='extract chunk-file(s) for reconstruction (all by default)',
                            action='store_true', dest='extractChunkfile')
         group.add_argument('-c', '--chunk', help='extract data chunk(s) (all by default)',
@@ -971,6 +1026,9 @@ class DZFileTools:
             print("[+] DZ Partition List\n=========================================")
         self.dz_file.display()
 
+    def cmdGenerateRawprograms(self):
+        self.dz_file.rawprogram()
+
     def cmdExtractChunk(self, files):
         if len(files) == 0:
             print("[+] Extracting all chunks!\n")
@@ -984,8 +1042,7 @@ class DZFileTools:
             try:
                 idx = int(idx)
             except ValueError:
-                print('[!] Bad value "{:s}" (must be number)'.format(
-                    idx), file=sys.stderr)
+                print('[!] Bad value "{:s}" (must be number)'.format(idx), file=sys.stderr)
                 sys.exit(1)
             if idx < 0 or idx >= self.dz_file.getChunkCount():
                 print("[!] Cannot extract out of range chunk {:d} (min=0 max={:d})".format(
@@ -1107,6 +1164,11 @@ class DZFileTools:
         # Extracting chunk(s)
         elif cmd.extractChunk:
             self.cmdExtractChunk(files)
+        
+        # Generate Rawprograms xml
+        elif cmd.rawprogram:
+            self.cmdGenerateRawprograms()
+            sys.exit(0)
 
         # Save the header for later reconstruction
         self.dz_file.saveHeader(cmd.dzfile)
